@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "0Effort",
+  "version": "0.1.0",
+  "description": "Canvas connector for 0Effort",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "0Effort"
+  },
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://canvas.ku.edu/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://canvas.ku.edu/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
+
