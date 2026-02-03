@@ -1,22 +1,48 @@
 // Runs on canvas.ku.edu pages
 console.log("[0Effort] content script loaded:", location.href);
 
+function extractCourseId(url) {
+  // matches .../courses/12345 or .../courses/12345/...
+  const m = url.match(/\/courses\/(\d+)/);
+  return m ? m[1] : null;
+}
+
 function scanCourses() {
-  // Try common Canvas dashboard card selector
-  const cards = Array.from(document.querySelectorAll('a.ic-DashboardCard__link'));
+  // Canvas dashboard course cards usually have this anchor
+  const cardLinks = Array.from(document.querySelectorAll("a.ic-DashboardCard__link"));
 
-  // Fallback: any anchor that looks like /courses/<id>
-  const fallback = Array.from(document.querySelectorAll('a[href*="/courses/"]'));
+  const candidates = cardLinks.length
+    ? cardLinks
+    : Array.from(document.querySelectorAll('a[href*="/courses/"]'));
 
-  const links = (cards.length ? cards : fallback)
-    .map(a => ({
-      name: (a.getAttribute("aria-label") || a.textContent || "").trim(),
-      url: a.href
-    }))
-    .filter(x => x.url.includes("/courses/"))
-    .slice(0, 30); // cap for now
+  const courses = candidates
+    .map((a) => {
+      const url = a.href;
+      const courseId = extractCourseId(url);
+      if (!courseId) return null;
 
-  return links;
+      // Try to get a clean name
+      const name =
+        a.getAttribute("aria-label")?.trim() ||
+        a.querySelector(".ic-DashboardCard__header-title")?.textContent?.trim() ||
+        a.textContent?.trim() ||
+        `Course ${courseId}`;
+
+      return { courseId, name, url };
+    })
+    .filter(Boolean);
+
+  // Deduplicate by courseId
+  const dedup = [];
+  const seen = new Set();
+  for (const c of courses) {
+    if (!seen.has(c.courseId)) {
+      seen.add(c.courseId);
+      dedup.push(c);
+    }
+  }
+
+  return dedup.slice(0, 30);
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
