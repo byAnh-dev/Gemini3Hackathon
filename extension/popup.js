@@ -1,5 +1,6 @@
 const statusEl = document.getElementById("status");
 const scanBtn = document.getElementById("scanBtn");
+const syncBtn = document.getElementById("syncBtn");
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -36,5 +37,23 @@ scanBtn.addEventListener("click", async () => {
       console.log("Courses:", response.courses);
     }
   );
+});
+
+//Sync button to connect to backend
+syncBtn.addEventListener("click", () => {
+	setStatus("Sending to backend...");
+
+	chrome.runtime.sendMessage({ type: "SYNC_NOW" }, (resp) => {
+		if (chrome.runtime.lastError) {
+			setStatus("Background error. Reload extension");
+			return;
+		}
+		if (!resp?.ok) {
+			setStatus(`Sync failed: ${resp?.error || "unknown"}`);
+			return;
+		}
+		setStatus(`Synced ${resp.courseCount} courses`);
+		console.log("Backend response:", resp.backend);
+	});
 });
 
