@@ -12,6 +12,7 @@ import SettingsPage from './components/SettingsPage';
 import AILab from './components/AILab';
 import SundayReviewModal from './components/SundayReviewModal';
 import Auth from './components/Auth';
+import PairPage from './components/PairPage';
 import { UserPreferences, Task, Course, TimeBlock } from './types';
 import { MOCK_TASKS, MOCK_COURSES, MOCK_SCHEDULE_BLOCKS } from './constants';
 import { Sparkles, Loader2 } from 'lucide-react';
@@ -134,7 +135,12 @@ const App: React.FC = () => {
     setSelectedTask(null);
     setSelectedCourse(null);
   };
-
+  
+  // Special route: the extension opens /pair?code=XXXX for device pairing
+  if (window.location.pathname.startsWith("/pair")) {
+    return <PairPage />;
+  }
+  
   // Rendering logic
   if (!isLoggedIn) {
     return <Auth onLogin={handleLogin} />;

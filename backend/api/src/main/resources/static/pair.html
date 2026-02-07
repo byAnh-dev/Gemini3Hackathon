@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>0Effort Pair</title>
+  </head>
+  <body style="font-family: Arial; max-width: 520px; margin: 40px auto;">
+    <h2>Pair Extension</h2>
+    <p>Pair code: <b id="code"></b></p>
+
+    <label>Dev user id (temporary):</label><br/>
+    <input id="uid" value="dev-user" style="width:100%; padding:8px;"/>
+
+    <button id="pairBtn" style="margin-top:12px; padding:10px; width:100%;">
+      Pair this device
+    </button>
+
+    <p id="status" style="margin-top:12px;"></p>
+
+    <script>
+      const params = new URLSearchParams(location.search);
+      const code = params.get("code");
+      document.getElementById("code").textContent = code || "(missing)";
+
+      document.getElementById("pairBtn").onclick = async () => {
+        const uid = document.getElementById("uid").value.trim() || "dev-user";
+        document.getElementById("status").textContent = "Pairing...";
+
+        const res = await fetch("/pair/confirm-dev", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ pairCode: code, uid })
+        });
+
+        const data = await res.json();
+        document.getElementById("status").textContent =
+          data.ok ? "Paired ✅ You can close this tab." : ("Failed: " + (data.error || "unknown"));
+      };
+    </script>
+  </body>
+</html>
+

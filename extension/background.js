@@ -1,5 +1,5 @@
 const BACKEND_BASE = "http://localhost:8080";
-
+const WEBSITE_URL = "http://localhost:3000";
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -51,7 +51,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       // open your placeholder pairing page
       await chrome.tabs.create({
-        url: `${BACKEND_BASE}/pair.html?code=${encodeURIComponent(pairCode)}`
+      url: `${WEBSITE_URL}/pair?code=${encodeURIComponent(pairCode)}`
       });
 
       const timeoutMs = 120000;

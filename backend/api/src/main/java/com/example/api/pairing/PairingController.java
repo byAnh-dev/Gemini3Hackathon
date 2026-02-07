@@ -7,7 +7,9 @@ import org.springframework.web.bind.annotation.*;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import org.springframework.web.bind.annotation.CrossOrigin;
 
+@CrossOrigin(origins = "http://localhost:3000")
 @RestController
 @RequestMapping("/pair")
 public class PairingController {
@@ -102,27 +104,78 @@ public class PairingController {
 	  return PairRequestResponse.success(pairCode, expires.toString());
 
 	}
+
 	@GetMapping("/status")
-public PairStatusResponse status(@RequestParam("code") String code) throws Exception {
-  if (code == null || code.isBlank()) {
-    return PairStatusResponse.fail("code missing");
-  }
+	public PairStatusResponse status(@RequestParam("code") String code) throws Exception {
+	  if (code == null || code.isBlank()) {
+	    return PairStatusResponse.fail("code missing");
+	  }
 
-  Firestore db = FirestoreClient.getFirestore();
-  var ref = db.collection("pairRequests").document(code);
-  var snap = ref.get().get();
+	  Firestore db = FirestoreClient.getFirestore();
+	  var ref = db.collection("pairRequests").document(code);
+	  var snap = ref.get().get();
 
-  if (!snap.exists()) {
-    return PairStatusResponse.fail("pairCode not found");
-  }
+	  if (!snap.exists()) {
+	    return PairStatusResponse.fail("pairCode not found");
+	  }
 
-  String s = snap.getString("status");
-  String deviceToken = snap.getString("deviceToken");
+	  String s = snap.getString("status");
+	  String deviceToken = snap.getString("deviceToken");
 
-  if ("PAIRED".equals(s) && deviceToken != null && !deviceToken.isBlank()) {
-    return PairStatusResponse.paired(deviceToken);
-  }
-  return PairStatusResponse.pending();
-}
+	  if ("PAIRED".equals(s) && deviceToken != null && !deviceToken.isBlank()) {
+	    return PairStatusResponse.paired(deviceToken);
+	  }
+	  return PairStatusResponse.pending();
+	}
+
+	@PostMapping("/confirm")
+	public PairConfirmDevResponse confirmReal(
+	    @RequestHeader(name = "Authorization", required = false) String authHeader,
+	    @RequestBody PairConfirmRequest req
+	) throws Exception {
+
+	  if (req.getPairCode() == null || req.getPairCode().isBlank()) {
+	    return PairConfirmDevResponse.fail("pairCode missing");
+	  }
+
+	  // 1) Extract Bearer token
+	  if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+	    return PairConfirmDevResponse.fail("Missing Authorization Bearer token");
+	  }
+	  String idToken = authHeader.substring("Bearer ".length()).trim();
+
+	  // 2) Verify Firebase ID token -> uid
+	  var decoded = com.google.firebase.auth.FirebaseAuth.getInstance().verifyIdToken(idToken);
+	  String uid = decoded.getUid();
+
+	  // 3) Check pairCode exists
+	  var db = com.google.firebase.cloud.FirestoreClient.getFirestore();
+	  var pairRef = db.collection("pairRequests").document(req.getPairCode());
+	  var snap = pairRef.get().get();
+	  if (!snap.exists()) {
+	    return PairConfirmDevResponse.fail("pairCode not found");
+	  }
+
+	  // 4) Create deviceToken
+	  String deviceToken = TokenUtil.generateDeviceToken();
+
+	  // 5) Write devices/{deviceToken}
+	  java.util.Map<String, Object> deviceDoc = new java.util.HashMap<>();
+	  deviceDoc.put("uid", uid);
+	  deviceDoc.put("revoked", false);
+	  deviceDoc.put("createdAt", java.time.Instant.now().toString());
+	  db.collection("devices").document(deviceToken).set(deviceDoc).get();
+
+	  // 6) Update pairRequests/{pairCode}
+	  java.util.Map<String, Object> pairUpdate = new java.util.HashMap<>();
+	  pairUpdate.put("status", "PAIRED");
+	  pairUpdate.put("uid", uid);
+	  pairUpdate.put("deviceToken", deviceToken);
+	  pairUpdate.put("pairedAt", java.time.Instant.now().toString());
+	  pairRef.update(pairUpdate).get();
+
+	  return PairConfirmDevResponse.success(deviceToken);
+	}
+
 
 }

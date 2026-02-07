@@ -33,6 +33,7 @@ export const MOCK_COURSES: Course[] = [
     syllabusSummary: 'Study of individual and firm behavior, market structures, and public policy implications in competitive markets.'
   },
 ];
+export const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
 
 export const MOCK_SCHEDULE_BLOCKS: TimeBlock[] = [
   // CS301
