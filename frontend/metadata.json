@@ -1,0 +1,8 @@
+{
+  "name": "AcademiQ - AI Study Agent",
+  "description": "A comprehensive study management system that uses Gemini 3 to parse syllabi, automate scheduling, and provide 'friction-killing' AI assistance for students.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
