@@ -1,6 +1,7 @@
 const statusEl = document.getElementById("status");
 const scanBtn = document.getElementById("scanBtn");
 const syncBtn = document.getElementById("syncBtn");
+const connectBtn = document.getElementById("connectBtn");
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -55,5 +56,31 @@ syncBtn.addEventListener("click", () => {
 		setStatus(`Synced ${resp.courseCount} courses`);
 		console.log("Backend response:", resp.backend);
 	});
+});
+
+//Show status when the pop up is open
+chrome.storage.local.get(["deviceToken"], (res) => {
+  const paired = !!res.deviceToken;
+  setStatus(paired ? "Paired ✅" : "Not paired ❌");
+
+  // optional: hide Connect if already paired
+  connectBtn.style.display = paired ? "none" : "block";
+});
+
+//call background to assign token
+connectBtn.addEventListener("click", () => {
+  setStatus("Starting connect…");
+  chrome.runtime.sendMessage({ type: "CONNECT" }, (resp) => {
+    if (chrome.runtime.lastError) {
+      setStatus("Background error. Reload extension.");
+      return;
+    }
+    if (!resp?.ok) {
+      setStatus("Connect failed: " + (resp?.error || "unknown"));
+      return;
+    }
+    setStatus("Paired ✅");
+    connectBtn.style.display = "none";
+  });
 });
 
