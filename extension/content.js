@@ -1,4 +1,4 @@
-iconst SYLLABUS_TEXT_CAP = 20000;     // cap text to reduce payload size
+const SYLLABUS_TEXT_CAP = 20000;     // cap text to reduce payload size
 const FETCH_CONCURRENCY = 3;         // don’t fetch 10 syllabi at once
 
 function parseCourseIdFromHref(href) {
