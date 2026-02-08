@@ -173,6 +173,15 @@ public class PairingController {
 	  pairUpdate.put("deviceToken", deviceToken);
 	  pairUpdate.put("pairedAt", java.time.Instant.now().toString());
 	  pairRef.update(pairUpdate).get();
+	//6.5) Mirror key status into users/{uid} for dashboard
+	db.collection("users").document(uid).set(
+	    java.util.Map.of(
+		"extensionPaired", true,
+		"lastDeviceToken", deviceToken,
+		"extensionPairedAt", java.time.Instant.now().toString()
+	    ),
+	    com.google.cloud.firestore.SetOptions.merge()
+	).get();
 
 	  return PairConfirmDevResponse.success(deviceToken);
 	}
