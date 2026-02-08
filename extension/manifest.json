@@ -3,17 +3,25 @@
   "name": "0Effort",
   "version": "0.1.0",
   "description": "Canvas connector for 0Effort",
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "0Effort"
-  },
-  "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["https://canvas.ku.edu/*", "http://localhost:8080/*"],
-  "background":{"service_worker":"background.js"},
+  "action": { "default_popup": "popup.html", "default_title": "0Effort" },
+  "background": { "service_worker": "background.js" },
+
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "https://canvas.ku.edu/*",
+    "https://ku.simplesyllabus.com/*",
+    "http://localhost:8080/*"
+  ],
+
   "content_scripts": [
     {
       "matches": ["https://canvas.ku.edu/*"],
       "js": ["content.js"]
+    },
+    {
+      "matches": ["https://ku.simplesyllabus.com/*"],
+      "js": ["provider_content.js"],
+      "run_at": "document_idle"  
     }
   ]
 }
