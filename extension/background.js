@@ -219,6 +219,13 @@ function handleSyllabusCaptured(msg, sender) {
   const pending = pendingSyllabus.get(tabId);
   if (!pending) return;
 
+  console.log(
+    "[SYLLABUS_CAPTURED]",
+    "courseId=", pending.courseId,
+    "url=", msg.url,
+    "chars=", (msg.text || "").length
+  );
+
   clearTimeout(pending.timer);
   pendingSyllabus.delete(tabId);
 
@@ -233,39 +240,32 @@ function handleSyllabusCaptured(msg, sender) {
     syllabusText: text
   });
 }
-
 // ---------------------------
 // Main message router
 // ---------------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // Provider -> background (no sendResponse needed)
+  // 1) Provider -> background (no sendResponse)
   if (msg?.type === "SYLLABUS_CAPTURED") {
     handleSyllabusCaptured(msg, sender);
-    return;
+    return; // no async response channel needed
   }
 
-  // CONNECT: pairing flow
+  // 2) CONNECT
   if (msg?.type === "CONNECT") {
     (async () => {
       const pairCode = await startPairRequest();
-
-      // Open a pairing page for the user.
-      // Adjust the path to whatever your frontend uses:
-      // - If you built a page like /pair?code=... use this
-      // - If you use a backend "confirm-dev" page, change WEBSITE_URL to BACKEND_BASE and the route accordingly
       await createTab(`${WEBSITE_URL}/pair?code=${encodeURIComponent(pairCode)}`, true);
 
       const timeoutMs = 120000;
       const start = Date.now();
+
       while (Date.now() - start < timeoutMs) {
         const st = await pollPairStatus(pairCode);
-
         if (st.status === "PAIRED" && st.deviceToken) {
           await saveDeviceToken(st.deviceToken);
           runtimeSendResponseSafe(sendResponse, { ok: true, deviceToken: st.deviceToken });
           return;
         }
-
         await sleep(1000);
       }
 
@@ -274,10 +274,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       runtimeSendResponseSafe(sendResponse, { ok: false, error: e?.message || String(e) });
     });
 
-    return true; // keep channel open
+    return true; // keep sendResponse alive
   }
 
-  // SYNC_NOW: requires deviceToken, scrapes courses, captures syllabus for each course, sends to /ingest
+  // 3) SYNC_NOW
   if (msg?.type === "SYNC_NOW") {
     (async () => {
       const deviceToken = await getDeviceToken();
@@ -286,24 +286,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
-      // find active tab
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id || !tab.url?.startsWith("https://canvas.ku.edu/")) {
         runtimeSendResponseSafe(sendResponse, { ok: false, error: "Open https://canvas.ku.edu first." });
         return;
       }
 
-      // make sure content.js exists
       await ensureContentScript(tab.id);
 
-      // scrape course list from content.js
       const scan = await sendTabMessage(tab.id, { type: "SCAN_COURSES" });
       if (!scan?.ok) throw new Error(scan?.error || "SCAN_COURSES failed");
 
       const courses = Array.isArray(scan.courses) ? scan.courses : [];
       const enrichedCourses = [];
 
-      // Capture syllabus for each course (sequential: simplest + safest)
       for (const c of courses) {
         const courseId = c.canvasCourseId || c.courseId || c.id;
         if (!courseId) {
@@ -319,6 +315,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         try {
           const out = await captureSyllabusForCourse(courseId);
+
+          console.log("[CAPTURE_OK]", courseId, "chars=", (out.syllabusText || "").length, "url=", out.syllabusProviderUrl);
+
           enrichedCourses.push({
             ...c,
             canvasCourseId: courseId,
@@ -327,6 +326,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             syllabusText: out.syllabusText
           });
         } catch (e) {
+          console.warn("[CAPTURE_FAIL]", courseId, e?.message || String(e));
           enrichedCourses.push({
             ...c,
             canvasCourseId: courseId,
@@ -345,20 +345,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         courses: enrichedCourses
       };
 
+      console.log("[INGEST_POST]", "courses=", enrichedCourses.length, "sampleChars=", enrichedCourses[0]?.syllabusText?.length);
+
       const out = await postIngest(payload);
 
+      // Optional: return a tiny preview so popup can show something
       runtimeSendResponseSafe(sendResponse, {
         ok: true,
         backend: out,
-        courseCount: enrichedCourses.length
+        courseCount: enrichedCourses.length,
+        preview: enrichedCourses.map(x => ({
+          courseId: x.canvasCourseId,
+          chars: (x.syllabusText || "").length,
+          url: x.syllabusProviderUrl
+        }))
       });
     })().catch((e) => {
       runtimeSendResponseSafe(sendResponse, { ok: false, error: e?.message || String(e) });
     });
 
-    return true; // keep channel open
+    return true; // keep sendResponse alive
   }
 
-  // Unknown message type: ignore
+  // Unknown message type
 });
 
