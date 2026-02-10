@@ -1,6 +1,5 @@
 console.log("0Effort content.js loaded on:", location.href);
 
-const SYLLABUS_TEXT_CAP = 20000;  // cap for privacy/perf
 const FETCH_CONCURRENCY = 3;      // don't spam requests
 
 // -------------------------------
@@ -28,57 +27,6 @@ async function fetchHtml(url) {
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error(`Fetch failed ${res.status} for ${url}`);
   return await res.text();
-}
-
-function htmlToText(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("script, style, noscript").forEach((n) => n.remove());
-
-  const main =
-    doc.querySelector("#content") ||
-    doc.querySelector(".ic-app-main-content") ||
-    doc.querySelector(".ic-Layout-contentMain") ||
-    doc.body;
-
-  const text = (main?.innerText || "").replace(/\n{3,}/g, "\n\n").trim();
-  return text.slice(0, SYLLABUS_TEXT_CAP);
-}
-
-function parseLtiAutoPost(html) {
-  // Many LTI launches are: <form method="post" action="https://provider/..."> ... hidden inputs ... </form>
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const form = doc.querySelector('form[method="post"][action]');
-  if (!form) return null;
-
-  const action = form.getAttribute("action");
-  if (!action) return null;
-
-  const inputs = {};
-  form.querySelectorAll("input[name]").forEach((inp) => {
-    const name = inp.getAttribute("name");
-    if (!name) return;
-    inputs[name] = inp.getAttribute("value") || "";
-  });
-
-  return { action: absoluteUrl(action), inputs };
-}
-
-function parseIframeSrc(html) {
-  // Sometimes the launch page embeds an iframe directly
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const iframe = doc.querySelector("iframe[src]");
-  if (!iframe) return null;
-  return absoluteUrl(iframe.getAttribute("src"));
-}
-
-// Promise wrapper for runtime messaging
-function runtimeSendMessage(msg) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(msg, (resp) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(resp);
-    });
-  });
 }
 
 // Concurrency limiter
@@ -155,20 +103,50 @@ function getSingleCourseFromUrlIfOnCoursePage() {
 
 // -------------------------------
 // Syllabus entrypoint discovery
+//
+// Uses multiple strategies to find the correct external tool URL:
+//   1. Canvas REST API (/api/v1/courses/:id/tabs) — most reliable
+//   2. Parse navigation links from course home HTML
+//   3. Hardcoded fallback tool ID
 // -------------------------------
 async function findSyllabusLaunchUrl(courseId) {
-  // Strategy:
-  // 1) Fetch course home page
-  // 2) Look for a nav link with text containing "syllabus"
-  // 3) Otherwise fallback to external tool known id 2240
-  // 4) Otherwise fallback to /syllabus
   const courseHome = normalizeCourseHome(courseId);
+
+  // ── Strategy 1: Canvas tabs API ──────────────────────────────
+  try {
+    const apiRes = await fetch(
+      `https://canvas.ku.edu/api/v1/courses/${courseId}/tabs`,
+      { credentials: "include", headers: { Accept: "application/json" } }
+    );
+    if (apiRes.ok) {
+      const tabs = await apiRes.json();
+      // Look for an external tool tab whose label mentions "syllabus"
+      const syllabusTab = tabs.find((t) => {
+        const label = (t.label || "").toLowerCase();
+        return (
+          (label.includes("syllabus") || label.includes("simple syllabus")) &&
+          (t.type === "external" || (t.html_url || "").includes("external_tools"))
+        );
+      });
+      if (syllabusTab) {
+        const url = syllabusTab.full_url || syllabusTab.html_url;
+        if (url) {
+          console.log("[findSyllabus] tabs API found:", url);
+          return absoluteUrl(url);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[findSyllabus] tabs API failed:", e.message);
+  }
+
+  // ── Strategy 2: Parse course home navigation links ───────────
   try {
     const html = await fetchHtml(courseHome);
     const doc = new DOMParser().parseFromString(html, "text/html");
 
-    // Look for "Syllabus" nav link first
-    const navAnchors = Array.from(doc.querySelectorAll('a[href]'));
+    // Check navigation links
+    const navAnchors = Array.from(doc.querySelectorAll("a[href]"));
 
     const syllabusAnchor = navAnchors.find((a) => {
       const text = (a.textContent || "").toLowerCase();
@@ -179,112 +157,18 @@ async function findSyllabusLaunchUrl(courseId) {
     });
 
     if (syllabusAnchor) {
-      return absoluteUrl(syllabusAnchor.getAttribute("href"));
+      const url = absoluteUrl(syllabusAnchor.getAttribute("href"));
+      console.log("[findSyllabus] nav link found:", url);
+      return url;
     }
-
-    // fallback: external tool
-    return `${courseHome}/external_tools/2240`;
-  } catch {
-    // fallback if home fetch fails
-    return `${courseHome}/external_tools/2240`;
-  }
-}
-
-// -------------------------------
-// Syllabus fetcher (handles LTI)
-// -------------------------------
-async function fetchSyllabusTextFromLaunchUrl(launchUrl) {
-  // 1) Fetch launch page HTML (Canvas)
-  const launchHtml = await fetchHtml(launchUrl);
-
-  // 2) If LTI auto-post form exists, ask background to POST it
-  const lti = parseLtiAutoPost(launchHtml);
-  if (lti) {
-    const resp = await runtimeSendMessage({
-      type: "LTI_POST",
-      action: lti.action,
-      inputs: lti.inputs,
-    });
-
-    if (resp?.ok && resp.html) {
-      const text = htmlToText(resp.html);
-      return {
-        syllabusText: text.length >= 50 ? text : "",
-        syllabusProviderUrl: lti.action,
-        mode: "LTI_FORM_POST",
-        error: null,
-      };
-    }
-
-    return {
-      syllabusText: "",
-      syllabusProviderUrl: lti.action,
-      mode: "LTI_FORM_POST",
-      error: resp?.error || "LTI_POST failed",
-    };
-  }
-
-  // 3) If there is an iframe src, try fetching that via background (CORS-safe)
-  const iframeSrc = parseIframeSrc(launchHtml);
-  if (iframeSrc) {
-    const resp = await runtimeSendMessage({
-      type: "LTI_IFRAME_FETCH",
-      url: iframeSrc,
-    });
-
-    if (resp?.ok && resp.html) {
-      const text = htmlToText(resp.html);
-      return {
-        syllabusText: text.length >= 50 ? text : "",
-        syllabusProviderUrl: iframeSrc,
-        mode: "IFRAME_FETCH",
-        error: null,
-      };
-    }
-
-    // If you don't implement LTI_IFRAME_FETCH in background, this will error; that's okay.
-    return {
-      syllabusText: "",
-      syllabusProviderUrl: iframeSrc,
-      mode: "IFRAME_FETCH",
-      error: resp?.error || "LTI_IFRAME_FETCH failed",
-    };
-  }
-
-  // 4) Otherwise: just try extracting text from launch page itself
-  const text = htmlToText(launchHtml);
-  return {
-    syllabusText: text.length >= 50 ? text : "",
-    syllabusProviderUrl: null,
-    mode: "DIRECT_TEXT",
-    error: null,
-  };
-}
-
-async function enrichCourseWithSyllabus(course) {
-  const courseId = course.canvasCourseId;
-  const syllabusUrl = await findSyllabusLaunchUrl(courseId);
-
-  try {
-    const out = await fetchSyllabusTextFromLaunchUrl(syllabusUrl);
-    return {
-      ...course,
-      syllabusUrl,                        // Canvas entrypoint (likely external_tools/2240)
-      syllabusProviderUrl: out.syllabusProviderUrl, // provider endpoint used (debug)
-      syllabusText: out.syllabusText,      // main result
-      syllabusFetchMode: out.mode,         // debug
-      syllabusFetchError: out.error,       // debug
-    };
   } catch (e) {
-    return {
-      ...course,
-      syllabusUrl,
-      syllabusProviderUrl: null,
-      syllabusText: "",
-      syllabusFetchMode: "ERROR",
-      syllabusFetchError: String(e?.message || e),
-    };
+    console.warn("[findSyllabus] course home parse failed:", e.message);
   }
+
+  // ── Strategy 3: Hardcoded fallback ───────────────────────────
+  const fallback = `${courseHome}/external_tools/2240`;
+  console.log("[findSyllabus] using hardcoded fallback:", fallback);
+  return fallback;
 }
 
 // -------------------------------
@@ -307,10 +191,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (single) courses = [single];
     }
 
+    // Discover syllabus launch URLs for each course
+    // (background.js will handle the actual text capture via hidden tabs)
     const enriched = await mapWithConcurrency(
       courses,
       FETCH_CONCURRENCY,
-      enrichCourseWithSyllabus
+      async (course) => {
+        try {
+          const syllabusUrl = await findSyllabusLaunchUrl(course.canvasCourseId);
+          return { ...course, syllabusUrl };
+        } catch (e) {
+          console.warn("[SCAN] Failed to find syllabus URL for", course.canvasCourseId, e.message);
+          return { ...course, syllabusUrl: null };
+        }
+      }
     );
 
     sendResponse({ ok: true, count: enriched.length, courses: enriched });

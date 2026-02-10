@@ -2,13 +2,13 @@
 //
 // Covers:
 // - Pairing flow (CONNECT): /pair/request -> open WEBSITE_URL -> poll /pair/status -> save deviceToken
-// - Sync flow (SYNC_NOW): ensure content.js -> SCAN_COURSES -> capture syllabus per course via hidden tab + LTI form submit
+// - Sync flow (SYNC_NOW): ensure content.js -> SCAN_COURSES -> capture syllabus per course via hidden tab
 // - Ingest: POST /ingest with deviceToken + courses enriched with syllabusText
 // - Provider callback: provider_content.js sends SYLLABUS_CAPTURED -> resolves pending capture and closes tab
 
 const BACKEND_BASE = "http://localhost:8080";
 const WEBSITE_URL = "http://localhost:3000";
-const SIMPLE_SYLLABUS_TOOL_ID = 2240;
+const SIMPLE_SYLLABUS_TOOL_ID = 2240; // fallback only; dynamic discovery preferred
 
 // ---------------------------
 // Small utilities
@@ -159,54 +159,126 @@ async function ensureContentScript(tabId) {
 }
 
 // ---------------------------
-// Simple Syllabus capture (Canvas LTI launcher -> ku.simplesyllabus.com)
+// Simple Syllabus capture
+//
+// Strategy:
+//   1. Open a hidden tab to the Canvas external_tools launch URL.
+//   2. Canvas renders a page with an LTI form and an iframe, then
+//      auto-submits the form into the iframe.
+//   3. The iframe navigates to ku.simplesyllabus.com.
+//   4. provider_content.js (with all_frames:true in manifest) runs
+//      inside that iframe, extracts text, and sends SYLLABUS_CAPTURED.
+//   5. We resolve the pending promise and close the tab.
+//
+// Fallbacks:
+//   - After 3 s: programmatically inject provider_content.js into
+//     all frames (in case the manifest-declared injection missed).
+//   - After 8 s more: manually submit the LTI form with target=_self
+//     so the tab itself navigates to Simple Syllabus (last resort).
 // ---------------------------
 
 // tabId -> { resolve, reject, courseId, timer }
 const pendingSyllabus = new Map();
 
-async function submitSimpleSyllabusForm(tabId) {
-  // Your HTML shows:
-  // <form action="https://ku.simplesyllabus.com/ui/lti-login" method="POST" target="tool_content_841" ...>
-  // We force navigation in the tab so provider_content.js can run on ku.simplesyllabus.com
-  const result = await execScript(tabId, () => {
-    const form = document.querySelector('form[action^="https://ku.simplesyllabus.com/"][method="POST"]');
-    if (!form) return { ok: false, error: "Simple Syllabus LTI form not found on page" };
+async function captureSyllabusForCourse(courseId, launchUrl, timeoutMs = 45000) {
+  // Use dynamically-discovered URL if available, else hardcoded fallback
+  const url =
+    launchUrl ||
+    `https://canvas.ku.edu/courses/${courseId}/external_tools/${SIMPLE_SYLLABUS_TOOL_ID}`;
 
-    form.target = "_self"; // override iframe target
-    form.submit();
-    return { ok: true };
-  });
+  console.log("[CAPTURE_START]", "courseId=", courseId, "url=", url);
 
-  if (!result?.ok) throw new Error(result?.error || "Failed to submit LTI form");
-}
-
-async function captureSyllabusForCourse(courseId, timeoutMs = 45000) {
-  const launchUrl =
-    `https://canvas.ku.edu/courses/${courseId}/external_tools/${SIMPLE_SYLLABUS_TOOL_ID}?display=borderless`;
-
-  const tab = await createTab(launchUrl, false);
+  const tab = await createTab(url, false);
   const tabId = tab.id;
 
   return new Promise(async (resolve, reject) => {
     const timer = setTimeout(async () => {
       pendingSyllabus.delete(tabId);
-      await removeTab(tabId);
+      await removeTab(tabId).catch(() => {});
       reject(new Error("Timed out capturing syllabus"));
     }, timeoutMs);
 
     pendingSyllabus.set(tabId, { resolve, reject, courseId, timer });
 
     try {
+      // 1. Wait for the Canvas LTI launch page to finish loading.
+      //    Canvas auto-submits the LTI form into an iframe; the iframe
+      //    then navigates to ku.simplesyllabus.com.
       await waitForTabComplete(tabId, 15000);
-      await submitSimpleSyllabusForm(tabId);
-      // After submit: tab navigates to ku.simplesyllabus.com
-      // provider_content.js will send SYLLABUS_CAPTURED to background
+
+      // 2. Give the iframe time to load after the main page completes.
+      await sleep(3000);
+
+      // 3. Fallback: if provider_content.js hasn't fired yet (manifest
+      //    injection didn't run), programmatically inject into all frames.
+      if (pendingSyllabus.has(tabId)) {
+        console.log("[FALLBACK_INJECT]", "tabId=", tabId);
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            files: ["provider_content.js"],
+          });
+        } catch (e) {
+          console.warn("[FALLBACK_INJECT] failed:", e.message);
+        }
+      }
+
+      // 4. Wait a bit more for the fallback injection to report back.
+      await sleep(5000);
+
+      // 5. Last resort: if still pending, try submitting the LTI form
+      //    manually with target="_self" so the tab navigates directly
+      //    to Simple Syllabus (away from the Canvas wrapper).
+      if (pendingSyllabus.has(tabId)) {
+        console.log("[LAST_RESORT_SUBMIT]", "tabId=", tabId);
+        try {
+          await execScript(tabId, () => {
+            // Case-insensitive search for any form that posts to simplesyllabus
+            const forms = document.querySelectorAll("form");
+            for (const form of forms) {
+              const action = form.getAttribute("action") || "";
+              const method = (form.getAttribute("method") || "").toUpperCase();
+              if (action.includes("simplesyllabus") && method === "POST") {
+                form.target = "_self";
+                form.submit();
+                return { ok: true };
+              }
+            }
+            return { ok: false, error: "No Simple Syllabus form found" };
+          });
+
+          // After form submission, the tab navigates to Simple Syllabus.
+          // Wait for it to load and for provider_content.js to run.
+          await waitForTabComplete(tabId, 15000).catch(() => {});
+          await sleep(2000);
+
+          // Try injecting again after navigation
+          if (pendingSyllabus.has(tabId)) {
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId, allFrames: true },
+                files: ["provider_content.js"],
+              });
+            } catch (e) {
+              console.warn("[LAST_RESORT_INJECT] failed:", e.message);
+            }
+          }
+        } catch (e) {
+          console.warn("[LAST_RESORT_SUBMIT] failed:", e.message);
+        }
+      }
+
+      // The promise will be resolved by handleSyllabusCaptured() when
+      // provider_content.js sends SYLLABUS_CAPTURED, or rejected by
+      // the timeout timer above.
     } catch (e) {
-      clearTimeout(timer);
-      pendingSyllabus.delete(tabId);
-      await removeTab(tabId);
-      reject(e);
+      // Only reject if not already resolved
+      if (pendingSyllabus.has(tabId)) {
+        clearTimeout(timer);
+        pendingSyllabus.delete(tabId);
+        await removeTab(tabId).catch(() => {});
+        reject(e);
+      }
     }
   });
 }
@@ -294,6 +366,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       await ensureContentScript(tab.id);
 
+      // SCAN_COURSES now returns courses with dynamically-discovered syllabusUrl
       const scan = await sendTabMessage(tab.id, { type: "SCAN_COURSES" });
       if (!scan?.ok) throw new Error(scan?.error || "SCAN_COURSES failed");
 
@@ -314,14 +387,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         try {
-          const out = await captureSyllabusForCourse(courseId);
+          // Use the syllabusUrl discovered by content.js (Canvas tabs API / nav parsing)
+          const out = await captureSyllabusForCourse(courseId, c.syllabusUrl);
 
           console.log("[CAPTURE_OK]", courseId, "chars=", (out.syllabusText || "").length, "url=", out.syllabusProviderUrl);
 
           enrichedCourses.push({
             ...c,
             canvasCourseId: courseId,
-            syllabusUrl: `https://canvas.ku.edu/courses/${courseId}/external_tools/${SIMPLE_SYLLABUS_TOOL_ID}`,
+            syllabusUrl: c.syllabusUrl || `https://canvas.ku.edu/courses/${courseId}/external_tools/${SIMPLE_SYLLABUS_TOOL_ID}`,
             syllabusProviderUrl: out.syllabusProviderUrl,
             syllabusText: out.syllabusText
           });
@@ -330,7 +404,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           enrichedCourses.push({
             ...c,
             canvasCourseId: courseId,
-            syllabusUrl: `https://canvas.ku.edu/courses/${courseId}/external_tools/${SIMPLE_SYLLABUS_TOOL_ID}`,
+            syllabusUrl: c.syllabusUrl || `https://canvas.ku.edu/courses/${courseId}/external_tools/${SIMPLE_SYLLABUS_TOOL_ID}`,
             syllabusProviderUrl: null,
             syllabusText: "",
             syllabusFetchError: e?.message || String(e)
@@ -369,4 +443,3 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Unknown message type
 });
-
